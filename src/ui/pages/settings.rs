@@ -192,6 +192,7 @@ impl SettingsPage {
 fn after_change(_id: &str, window: &mut Window, cx: &mut App) {
     apply_theme(Some(window), cx);
     crate::player::controller::apply_settings(cx);
+    crate::tray::sync(cx);
     crate::ui::app::refresh_all_pages(cx);
 }
 
@@ -529,7 +530,19 @@ impl SettingsPage {
         });
         card(cx)
             .children(note)
-            .child(row("Background play", "Keep playing when the window is minimized (off: pause, resume on restore)", switch("bgp", s.background_play, |s, v| s.background_play = v, cx), cx))
+            .child(row("Background play", "Keep playing when the window is minimized or hidden in the tray (off: pause, resume on restore)", switch("bgp", s.background_play, |s, v| s.background_play = v, cx), cx))
+            .child(row(
+                "Minimize to tray",
+                "The minimize button hides the window in the system tray. Off by default, so minimize still goes to the taskbar",
+                switch("tray-min", s.minimize_to_tray, |s, v| s.minimize_to_tray = v, cx),
+                cx,
+            ))
+            .child(row(
+                "Close to tray",
+                "The close button hides the window in the tray. Off by default, so close still quits. Quit from the tray menu",
+                switch("tray-close", s.close_to_tray, |s, v| s.close_to_tray = v, cx),
+                cx,
+            ))
             .child(row("Most replayed graph", "Heat line above the seek bar", switch("heat", s.show_heatmap, |s, v| s.show_heatmap = v, cx), cx))
             .child(row("Jump ahead", "Button to skip to the most replayed part", switch("jump", s.jump_ahead, |s, v| s.jump_ahead = v, cx), cx))
             .child(row("Enhanced bitrate", "Picks the highest-bitrate stream YouTube offers for the chosen quality", switch("ebr", s.enhanced_bitrate, |s, v| s.enhanced_bitrate = v, cx), cx))

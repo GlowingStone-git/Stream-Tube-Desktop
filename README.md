@@ -53,6 +53,7 @@ goes through libmpv, so it starts fast and scrolls smoothly even with big feeds.
 - Resumes where you left off, remembers your last quality, autoplays the next video or loops, and plays whole playlists as a queue
 - A miniplayer while you browse that you can drag anywhere and resize (it remembers where you put it), a picture-in-picture window, theater mode and fullscreen
 - Keeps playing when minimized, or pauses and resumes when you come back
+- Optional system tray (*Settings → Premium features*, both off until you turn them on): **Minimize to tray** hides the window from the taskbar, **Close to tray** makes the close button do the same instead of quitting. Click the tray icon to bring the window back. The tray menu shows or hides the window, plays or pauses, skips when there is a next or previous video, and quits. Audio follows the Background play setting while the window is in the tray. On Linux the icon uses the desktop's StatusNotifier (a panel that supports AppIndicators); if that isn't available the toggles do nothing and the window behaves as before
 - Live streams with live chat (Top chat or every message), and chatting when signed in
 - Shorts in a vertical player that moves to the next one by itself, or open them in the regular player. Shorts comments open their replies as threads too
 - Hold Space or press and hold on the video to play at 2x

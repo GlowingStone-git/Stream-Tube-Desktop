@@ -108,6 +108,10 @@ pub struct Settings {
     /// "confirm you're not a bot" wall while IPv4 from the same line doesn't.
     pub ipv4_only: bool,
     pub background_play: bool,
+    /// Minimize hides the window in the system tray instead of the taskbar.
+    pub minimize_to_tray: bool,
+    /// The close button hides the window in the tray instead of quitting.
+    pub close_to_tray: bool,
     // Tweaks (from YouTube patch sets like Morphe/ReVanced)
     pub ambient_mode: bool,
     pub shorts_in_player: bool,
@@ -215,6 +219,8 @@ impl Default for Settings {
             enhanced_bitrate: false,
             ipv4_only: true,
             background_play: true,
+            minimize_to_tray: false,
+            close_to_tray: false,
             ambient_mode: true,
             shorts_in_player: false,
             shorts_autoadvance: false,
