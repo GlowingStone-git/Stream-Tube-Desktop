@@ -195,6 +195,14 @@ pub fn has_autoplay_next(cx: &App) -> bool {
 pub struct AutoplayNext(pub Option<VideoItem>);
 impl Global for AutoplayNext {}
 
+pub fn play_previous(cx: &mut App) {
+    let p = player(cx);
+    let pos = p.read(cx).queue_pos;
+    if let Some(i) = pos.filter(|i| *i > 0) {
+        p.update(cx, |p, cx| p.play_queue_index(i - 1, cx));
+    }
+}
+
 pub fn play_next(window: &mut Window, cx: &mut App) {
     let p = player(cx);
     let (pos, len) = {
@@ -513,6 +521,7 @@ impl AppView {
                 this.had_video = has;
                 cx.notify();
             }
+            crate::tray::note_player(cx);
         }));
         subs.push(cx.observe_window_bounds(window, |this: &mut Self, window, _| {
             // persist placement at most twice a second while the user drags/resizes
@@ -560,10 +569,11 @@ impl AppView {
                 apply_theme(Some(window), cx);
             }
         }));
-        window.on_window_should_close(cx, |window, _| {
+        window.on_window_should_close(cx, |window, cx| {
             crate::save_window_bounds(window);
-            true
+            !crate::tray::intercept_close(window, cx)
         });
+        crate::tray::install(cx);
         let mini_view = cx.new(|cx| PlayerView::new(p.clone(), true, cx));
         let main_view = cx.new(|cx| PlayerView::new(p.clone(), false, cx));
         let preview_view = cx.new(crate::player::preview::PreviewView::new);
@@ -3172,7 +3182,11 @@ fn window_controls(maximized: bool, cx: &App) -> impl IntoElement {
             .on_click(move |_, window, cx| {
                 cx.stop_propagation();
                 match area {
-                    WindowControlArea::Min => window.minimize_window(),
+                    WindowControlArea::Min => {
+                        if !crate::tray::hide_for_minimize(window, cx) {
+                            window.minimize_window();
+                        }
+                    }
                     WindowControlArea::Max => toggle_maximize(window),
                     WindowControlArea::Close => {
                         crate::save_window_bounds(window);
@@ -3249,7 +3263,8 @@ pub fn refresh_all_pages(cx: &mut App) {
     cx.refresh_windows();
 }
 
-/// True when the window is minimized (iconic). Elsewhere a hidden window counts as minimized.
+/// True when the window is minimized (iconic) or hidden in the tray.
+/// Elsewhere a hidden window counts as minimized.
 fn window_minimized(window: &Window) -> bool {
     #[cfg(windows)]
     {
@@ -3258,16 +3273,19 @@ fn window_minimized(window: &Window) -> bool {
         unsafe extern "system" {
             fn IsIconic(hwnd: isize) -> i32;
         }
-        if let Ok(h) = HasWindowHandle::window_handle(window) {
-            if let RawWindowHandle::Win32(w) = h.as_raw() {
-                return unsafe { IsIconic(w.hwnd.get()) } != 0;
-            }
-        }
-        false
+        let iconic = HasWindowHandle::window_handle(window)
+            .ok()
+            .and_then(|h| match h.as_raw() {
+                RawWindowHandle::Win32(w) => Some(unsafe { IsIconic(w.hwnd.get()) } != 0),
+                _ => None,
+            })
+            .unwrap_or(false);
+        return crate::tray::counts_as_minimized(iconic, crate::tray::is_hidden());
     }
     #[cfg(not(windows))]
     {
         let _ = window;
+        // A hidden window counts as minimized, and the tray path is hidden too.
         true
     }
 }

@@ -12,6 +12,7 @@ mod links;
 mod locale;
 mod player;
 mod store;
+mod tray;
 mod ui;
 mod updater;
 

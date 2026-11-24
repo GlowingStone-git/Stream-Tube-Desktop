@@ -31,6 +31,10 @@ tungstenite = { version = "0.30.0", default-features = false, features = ["hands
 # the Linux Secret Service. crypto-rust keeps that path off OpenSSL.
 # Without these features the crate's default store is an in-memory mock.
 keyring = { version = "3.6.3", default-features = false, features = ["windows-native", "apple-native", "async-secret-service", "crypto-rust"] }
+# Tray icon. The default Linux backend needs a GTK loop, which this app does
+# not run. `ksni` is StatusNotifier on its own thread. Windows and macOS use
+# the native backends. Left click is not the menu, so it can restore the window.
+tray-icon = { version = "0.26", default-features = false, features = ["ksni"] }
 
 [profile.dev.package."*"]
 opt-level = 2
