@@ -1885,6 +1885,18 @@ impl AppView {
                     pl.seek_by(10.0);
                     true
                 }
+                ("[" | "bracketleft", false) => {
+                    pl.mark_section_start(cx);
+                    true
+                }
+                ("]" | "bracketright", false) => {
+                    pl.mark_section_end(cx);
+                    true
+                }
+                ("\\" | "backslash", false) => {
+                    pl.clear_section_loop_user(cx);
+                    true
+                }
                 ("left", _) => {
                     pl.seek_by(-step);
                     true
