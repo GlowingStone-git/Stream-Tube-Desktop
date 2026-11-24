@@ -568,7 +568,11 @@ impl SettingsPage {
             pill("acct-in", Some("circle-user"), "Sign in", cx).on_click(|_, window, cx| crate::ui::app::open_sign_in(window, cx))
         };
         let account_desc = account.map(|a| a.name).unwrap_or_else(|| "Personal recommendations, subscriptions, likes and history".into());
-        card(cx)
+        let mut general = card(cx);
+        for msg in crate::secrets::warning_messages() {
+            general = general.child(row("Sign-in storage", &msg, div(), cx));
+        }
+        general
             .child(row("YouTube account", &account_desc, account_ctl, cx))
             .child({
                 let (desc, ctl) = match crate::api::web::account_name().filter(|_| crate::api::web::connected()) {

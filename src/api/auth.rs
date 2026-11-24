@@ -43,13 +43,14 @@ pub struct DeviceCode {
 
 fn state() -> &'static Mutex<Option<Stored>> {
     static S: std::sync::OnceLock<Mutex<Option<Stored>>> = std::sync::OnceLock::new();
-    S.get_or_init(|| Mutex::new(crate::store::kv_get("auth").and_then(|s| serde_json::from_str(&s).ok())))
+    S.get_or_init(|| Mutex::new(crate::secrets::load(crate::secrets::AUTH).and_then(|s| serde_json::from_str(&s).ok())))
 }
 
+/// Tokens go to the OS credential store. The database copy is blanked there.
 fn persist(s: &Option<Stored>) {
     match s {
-        Some(v) => crate::store::kv_set("auth", &serde_json::to_string(v).unwrap_or_default()),
-        None => crate::store::kv_set("auth", ""),
+        Some(v) => crate::secrets::save(crate::secrets::AUTH, &serde_json::to_string(v).unwrap_or_default()),
+        None => crate::secrets::clear(crate::secrets::AUTH),
     }
 }
 

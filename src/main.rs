@@ -4,6 +4,7 @@ mod assets;
 mod display;
 mod perf;
 mod recommend;
+mod secrets;
 mod downloads;
 mod feed;
 mod import;
@@ -64,6 +65,9 @@ fn main() {
     }
     perf::init();
     store::init();
+    // Move any YouTube session still sitting in the database into the OS
+    // credential store before the UI reads it.
+    secrets::preload();
     perf::mark("store");
     display::choose();
     perf::mark("display");

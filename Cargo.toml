@@ -26,6 +26,11 @@ open = "5"
 raw-window-handle = "0.6"
 sha1 = "0.11"
 tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
+# YouTube sign-in goes in the OS credential store. Features are per platform:
+# Windows Credential Manager, macOS Keychain, and (via zbus, no libdbus)
+# the Linux Secret Service. crypto-rust keeps that path off OpenSSL.
+# Without these features the crate's default store is an in-memory mock.
+keyring = { version = "3.6.3", default-features = false, features = ["windows-native", "apple-native", "async-secret-service", "crypto-rust"] }
 
 [profile.dev.package."*"]
 opt-level = 2
