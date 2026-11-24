@@ -85,6 +85,7 @@ goes through libmpv, so it starts fast and scrolls smoothly even with big feeds.
 - Or sign in with your Google account to get your own Home feed, subscriptions, playlists, likes and subscribe button
 - Watch history and search history from your other devices sync in, with resume positions, and single entries can be removed
 - Connect your YouTube history (*Settings → General*) and it works the other way too: videos you watch in Stream Tube show up in your YouTube history, and your phone or TV resumes them where you stopped. You sign in once in a browser window with a fresh profile (Chrome, Edge, Brave or Chromium) that closes and is deleted afterwards, or load a `cookies.txt` file instead
+- YouTube sign-in (the browser cookies and the TV access and refresh tokens) is stored in the system credential store: Windows Credential Manager, macOS Keychain, or the Linux Secret Service (GNOME Keyring or KWallet)
 - History, watch later, favourites and playlists are stored in a local SQLite database, and you can pause or clear history at any time
 - Import from YouTube Takeout, NewPipe, FreeTube or OPML. Export to NewPipe JSON, YouTube CSV, OPML or a full backup
 
@@ -270,6 +271,32 @@ somewhere else (for example a portable copy).
 If you used the app back when it was called Ferrotube, your old data is moved
 over automatically on first launch.
 
+The browser-cookie session and the TV account's access and refresh tokens are
+stored in the operating system's credential store, under the service name
+`streamtube`, separate from that database:
+
+- Windows: Credential Manager
+- macOS: Keychain
+- Linux: Secret Service, which is GNOME Keyring or KWallet
+
+The database only remembers that a sign-in exists (`auth.kept` and
+`web_session.kept`). The first launch after an update that introduced this
+moves a session that was still stored in the database into the credential store
+and then blanks those rows, so an existing sign-in stays signed in. Signing out
+deletes the credential entries. A cookie jar is larger than Windows Credential
+Manager's limit of about 2.5 KB per entry, so a session is split across
+`auth.0`, `auth.1`, … (and the same for `web_session`), with `auth.n` /
+`web_session.n` holding how many pieces there are.
+
+If the credential store can't be opened — a headless Linux session without
+Secret Service, or a locked keyring — Stream Tube keeps the sign-in in memory
+for that run only. The session is cleared out of the database, Settings →
+General explains what happened, and quitting the app forgets the sign-in.
+Install and unlock GNOME Keyring or KWallet, then sign in again, to stay signed
+in. A session that was already in the credential store stays there until the
+store can be opened; that run starts signed out. If sign-out couldn't reach
+the store, the entry is removed the next time it can.
+
 ## Project layout
 
 ```
@@ -279,6 +306,7 @@ src/
   ui/        app shell, pages (home, watch, shorts, settings, ...), cards, PiP window
   feed.rs    local subscription feed
   import.rs  Takeout / NewPipe / FreeTube / OPML import
+  secrets.rs YouTube sign-in in the OS credential store
   store.rs   SQLite storage
 ```
 

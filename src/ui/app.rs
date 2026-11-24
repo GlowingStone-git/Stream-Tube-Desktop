@@ -310,7 +310,10 @@ pub fn import_web_cookies(cx: &mut App) {
                 });
             }
             match res {
-                Ok(name) => toast(cx, format!("Connected as {name}. What you watch now shows in your YouTube history.")),
+                Ok(name) => {
+                    toast(cx, format!("Connected as {name}. What you watch now shows in your YouTube history."));
+                    toast_secret_warning(cx);
+                }
                 Err(e) => toast(cx, crate::ui::friendly_error(&format!("{e:#}"))),
             }
             cx.refresh_windows();
@@ -319,9 +322,16 @@ pub fn import_web_cookies(cx: &mut App) {
     .detach();
 }
 
+fn toast_secret_warning(cx: &mut App) {
+    if let Some(text) = crate::secrets::short_warning() {
+        toast(cx, text);
+    }
+}
+
 pub fn disconnect_web(cx: &mut App) {
     crate::api::web::disconnect();
     toast(cx, "Browser sign-in disconnected");
+    toast_secret_warning(cx);
     cx.refresh_windows();
 }
 
@@ -334,6 +344,7 @@ pub fn open_sign_in(_window: &mut Window, cx: &mut App) {
 pub fn sign_out(cx: &mut App) {
     crate::api::auth::sign_out();
     toast(cx, "Signed out");
+    toast_secret_warning(cx);
     if let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) {
         app.update(cx, |a, cx| {
             a.reload_page = true;
@@ -593,7 +604,7 @@ impl AppView {
                 .detach();
             }
         }
-        Self {
+        let view = Self {
             tabs: vec![Tab { id: 1, route: start.clone(), page: None, history: Vec::new(), forward: Vec::new() }],
             active_tab: 0,
             next_tab_id: 2,
@@ -628,7 +639,15 @@ impl AppView {
             dl_panel: false,
             space_down: false,
             _subs: subs,
-        }
+        };
+        // The window is still opening; wait until it's on screen so this
+        // toast isn't already gone when the user first sees it.
+        cx.spawn(async move |_this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(800)).await;
+            let _ = _this.update(cx, |_, cx| toast_secret_warning(cx));
+        })
+        .detach();
+        view
     }
 
     fn start_sign_in(&mut self, cx: &mut Context<Self>) {
@@ -683,6 +702,7 @@ impl AppView {
                             t.login.code = None;
                             t.reload_page = true;
                             toast(cx, format!("Signed in as {}", acc.name));
+                            toast_secret_warning(cx);
                             cx.notify();
                         });
                         // bring the account's history and subscriptions to this device
@@ -756,6 +776,7 @@ impl AppView {
                             t.dialog = None;
                         }
                         toast(cx, format!("Connected as {name}. What you watch now shows in your YouTube history."));
+                        toast_secret_warning(cx);
                         cx.refresh_windows();
                     }
                     Err(e) => {

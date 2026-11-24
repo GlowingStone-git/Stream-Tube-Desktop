@@ -33,13 +33,17 @@ struct Session {
 fn session() -> &'static Mutex<Option<Session>> {
     static S: OnceLock<Mutex<Option<Session>>> = OnceLock::new();
     S.get_or_init(|| {
-        let s: Option<Session> = crate::store::kv_get("web_session").and_then(|s| serde_json::from_str(&s).ok());
+        let s: Option<Session> = crate::secrets::load(crate::secrets::WEB_SESSION).and_then(|s| serde_json::from_str(&s).ok());
         Mutex::new(s.filter(|s| has_login(&s.cookies)))
     })
 }
 
+/// Cookies go to the OS credential store. The database copy is blanked there.
 fn save(s: &Option<Session>) {
-    crate::store::kv_set("web_session", &s.as_ref().map(|s| serde_json::to_string(s).unwrap_or_default()).unwrap_or_default());
+    match s {
+        Some(v) => crate::secrets::save(crate::secrets::WEB_SESSION, &serde_json::to_string(v).unwrap_or_default()),
+        None => crate::secrets::clear(crate::secrets::WEB_SESSION),
+    }
 }
 
 fn has_login(c: &BTreeMap<String, String>) -> bool {
