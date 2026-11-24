@@ -55,6 +55,11 @@ pub struct Player {
     pub ambient: Option<Rgba>,
     ambient_tick: u32,
     pub loop_video: bool,
+    /// Section loop. Both ends are needed before anything repeats; a new video clears them.
+    pub loop_a: Option<f64>,
+    pub loop_b: Option<f64>,
+    /// Keeps a late time update from seeking back to A again right after a jump.
+    ab_jumped: Option<std::time::Instant>,
     load_serial: u64,
     last_progress_save: f64,
     pub storyboard: Option<Storyboard>,
@@ -139,6 +144,9 @@ impl Player {
             ambient: None,
             ambient_tick: 0,
             loop_video: s.loop_video,
+            loop_a: None,
+            loop_b: None,
+            ab_jumped: None,
             load_serial: 0,
             last_progress_save: 0.0,
             storyboard: None,
@@ -288,6 +296,8 @@ impl Player {
             MpvEvent::FileLoaded => {
                 self.loading = false;
                 self.eof = false;
+                // loadfile can drop properties set before the file opened
+                self.apply_section_loop();
                 self.apply_caption();
                 cx.emit(PlayerEvent::Loaded);
                 cx.notify();
@@ -307,7 +317,7 @@ impl Player {
                         }
                     }
                 }
-                if eof {
+                if eof && !self.restart_section() {
                     self.on_ended(cx);
                 }
                 cx.notify();
@@ -328,11 +338,17 @@ impl Player {
                     ("duration", PropValue::Double(d)) => self.duration = d,
                     ("pause", PropValue::Flag(b)) => self.paused = b,
                     ("eof-reached", PropValue::Flag(b)) => {
-                        if b && !self.eof {
+                        if b && self.section_loop().is_some() {
+                            // The section includes the end of the file. Stay in it
+                            // instead of treating this as the video finishing.
+                            self.eof = false;
+                            self.restart_section();
+                        } else if b && !self.eof {
                             self.eof = true;
                             self.on_ended(cx);
+                        } else {
+                            self.eof = b;
                         }
-                        self.eof = b;
                     }
                     ("paused-for-cache", PropValue::Flag(b)) => self.buffering = b,
                     ("seeking", PropValue::Flag(b)) => self.seeking = b,
@@ -354,6 +370,9 @@ impl Player {
     }
 
     fn on_ended(&mut self, cx: &mut Context<Self>) {
+        if self.restart_section() {
+            return;
+        }
         self.save_progress(true);
         if self.loop_video {
             self.seek_to(0.0);
@@ -379,6 +398,15 @@ impl Player {
     }
 
     fn on_time(&mut self, cx: &mut Context<Self>) {
+        // mpv's ab-loop seeks at B. This catches a build that ignored the
+        // property, without jumping early and fighting one that honored it.
+        if let Some((a, b)) = self.section_loop() {
+            let recent = self.ab_jumped.is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(400));
+            if !recent && section_reached(b, self.time, self.duration) {
+                self.ab_jumped = Some(std::time::Instant::now());
+                self.seek_to(a);
+            }
+        }
         let t = self.time;
         // progress save
         if (t - self.last_progress_save).abs() >= 5.0 {
@@ -481,6 +509,7 @@ impl Player {
             crate::api::web::report_stop(&prev.id, self.time);
         }
         let Some(mpv) = self.ensure_mpv(cx) else {
+            self.clear_section_loop();
             self.video = Some(video);
             cx.notify();
             return;
@@ -503,6 +532,7 @@ impl Player {
         self.heatmap.clear();
         self.annotations = Arc::new(Vec::new());
         self.ambient = None;
+        self.clear_section_loop();
         self.channel_id = video.channel_id.clone();
         self.audio_track = None;
         if let Some(old) = self.frame.take() {
@@ -942,7 +972,17 @@ impl Player {
     }
 
     pub fn seek_to(&mut self, t: f64) {
-        let t = if self.duration > 0.0 { t.clamp(0.0, self.duration - 0.1) } else { t.max(0.0) };
+        let t = if self.duration > 0.0 { t.clamp(0.0, (self.duration - 0.1).max(0.0)) } else { t.max(0.0) };
+        // A deliberate seek past the section leaves the loop. The jump back to
+        // A stays inside, so the loop itself does not clear.
+        if let Some((a, b)) = self.section_loop() {
+            if !seek_stays_in_section(a, b, t) {
+                self.loop_a = None;
+                self.loop_b = None;
+                self.ab_jumped = None;
+                self.apply_section_loop();
+            }
+        }
         self.time = t;
         if let Some(m) = &self.mpv {
             let _ = m.command(&["seek", &format!("{t}"), "absolute+exact"]);
@@ -1013,6 +1053,121 @@ impl Player {
         self.loop_video = l;
     }
 
+    /// Both ends, when they form a range long enough to repeat.
+    pub fn section_loop(&self) -> Option<(f64, f64)> {
+        section_loop_range(self.loop_a, self.loop_b)
+    }
+
+    /// "0:12–0:40", or just the end that has been set.
+    pub fn section_label(&self) -> Option<String> {
+        section_label(self.loop_a, self.loop_b)
+    }
+
+    fn is_live(&self) -> bool {
+        self.streams.as_ref().is_some_and(|s| s.is_live) || self.video.as_ref().is_some_and(|v| v.is_live)
+    }
+
+    /// Sets A to the playback position. An end that would now fall before it is dropped.
+    pub fn mark_section_start(&mut self, cx: &mut Context<Self>) {
+        if self.is_live() {
+            toast(cx, "Section loop isn't available on a live stream");
+            return;
+        }
+        let had_end = self.loop_b;
+        match set_section_point(self.loop_a, self.loop_b, SectionPoint::Start, self.time, self.duration) {
+            Ok((a, b)) => {
+                self.loop_a = a;
+                self.loop_b = b;
+                self.apply_section_loop();
+                let dropped = had_end.is_some() && b.is_none();
+                let msg = match self.section_label() {
+                    Some(label) if self.section_loop().is_some() => format!("Loop {label}"),
+                    Some(label) if dropped => format!("Loop start {label}. Set the end again"),
+                    Some(label) => format!("Loop start {label}"),
+                    None => "Loop start set".into(),
+                };
+                toast(cx, msg);
+            }
+            Err(msg) => toast(cx, msg),
+        }
+        cx.notify();
+    }
+
+    /// Sets B to the playback position.
+    pub fn mark_section_end(&mut self, cx: &mut Context<Self>) {
+        if self.is_live() {
+            toast(cx, "Section loop isn't available on a live stream");
+            return;
+        }
+        match set_section_point(self.loop_a, self.loop_b, SectionPoint::End, self.time, self.duration) {
+            Ok((a, b)) => {
+                self.loop_a = a;
+                self.loop_b = b;
+                self.apply_section_loop();
+                let msg = match self.section_label() {
+                    Some(label) if self.section_loop().is_some() => format!("Loop {label}"),
+                    Some(label) => format!("Loop end {label}"),
+                    None => "Loop end set".into(),
+                };
+                toast(cx, msg);
+            }
+            Err(_) => toast(cx, "Set the end after the start"),
+        }
+        cx.notify();
+    }
+
+    /// Moves one end by `delta` seconds, without crossing the other.
+    pub fn nudge_section(&mut self, which: SectionPoint, delta: f64, cx: &mut Context<Self>) {
+        let (a, b) = nudge_section_point(self.loop_a, self.loop_b, which, delta, self.duration);
+        self.loop_a = a;
+        self.loop_b = b;
+        self.apply_section_loop();
+        cx.notify();
+    }
+
+    pub fn clear_section_loop(&mut self) {
+        self.loop_a = None;
+        self.loop_b = None;
+        self.ab_jumped = None;
+        self.apply_section_loop();
+    }
+
+    /// Clears the section and says so, when there was one.
+    pub fn clear_section_loop_user(&mut self, cx: &mut Context<Self>) {
+        if self.loop_a.is_none() && self.loop_b.is_none() {
+            return;
+        }
+        self.clear_section_loop();
+        toast(cx, "Section loop cleared");
+        cx.notify();
+    }
+
+    /// Back to A. False when no section is armed.
+    fn restart_section(&mut self) -> bool {
+        let Some((a, _)) = self.section_loop() else { return false };
+        self.eof = false;
+        self.ab_jumped = Some(std::time::Instant::now());
+        self.seek_to(a);
+        self.set_paused(false);
+        true
+    }
+
+    fn apply_section_loop(&self) {
+        let Some(mpv) = &self.mpv else { return };
+        match self.section_loop() {
+            Some((a, b)) => {
+                mpv.set("ab-loop-a", &format!("{a:.3}"));
+                mpv.set("ab-loop-b", &format!("{b:.3}"));
+            }
+            None => {
+                // "no" is mpv's off value. Setting only one end makes it loop
+                // the rest of the file, so both stay off until the range is valid.
+                mpv.set("ab-loop-a", "no");
+                mpv.set("ab-loop-b", "no");
+            }
+        }
+    }
+
     pub fn frame_step(&mut self, forward: bool) {
         if let Some(m) = &self.mpv {
             let _ = m.command(&[if forward { "frame-step" } else { "frame-back-step" }]);
@@ -1044,6 +1199,7 @@ impl Player {
             let _ = m.command(&["stop"]);
         }
         self.video = None;
+        self.clear_section_loop();
         self.streams = None;
         self.loading = false;
         self.queue.clear();
@@ -1149,6 +1305,110 @@ mod caption_tests {
     }
 }
 
+/// Which end of a section loop a control is editing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SectionPoint {
+    Start,
+    End,
+}
+
+/// Shortest repeat that counts as a section. Shorter than this, the two ends
+/// are remembered but playback is left alone.
+const SECTION_MIN: f64 = 0.5;
+
+fn clamp_point(t: f64, duration: f64) -> f64 {
+    let t = t.max(0.0);
+    if duration > 1.0 { t.min(duration) } else { t }
+}
+
+/// Stores one end. Setting the start past the current end drops the end.
+pub fn set_section_point(
+    start: Option<f64>,
+    end: Option<f64>,
+    which: SectionPoint,
+    time: f64,
+    duration: f64,
+) -> Result<(Option<f64>, Option<f64>), &'static str> {
+    let time = clamp_point(time, duration);
+    match which {
+        SectionPoint::Start => {
+            let end = end.filter(|e| *e >= time + SECTION_MIN);
+            Ok((Some(time), end))
+        }
+        SectionPoint::End => {
+            if let Some(s) = start {
+                if time < s + SECTION_MIN {
+                    return Err("end before start");
+                }
+            }
+            Ok((start, Some(time)))
+        }
+    }
+}
+
+/// Moves one end by `delta` seconds and keeps it from crossing the other.
+pub fn nudge_section_point(
+    start: Option<f64>,
+    end: Option<f64>,
+    which: SectionPoint,
+    delta: f64,
+    duration: f64,
+) -> (Option<f64>, Option<f64>) {
+    match which {
+        SectionPoint::Start => {
+            let Some(cur) = start else { return (start, end) };
+            let mut n = clamp_point(cur + delta, duration);
+            if let Some(b) = end {
+                if n > b - SECTION_MIN {
+                    n = clamp_point(b - SECTION_MIN, duration);
+                }
+            }
+            (Some(n), end)
+        }
+        SectionPoint::End => {
+            let Some(cur) = end else { return (start, end) };
+            let mut n = clamp_point(cur + delta, duration);
+            if let Some(a) = start {
+                if n < a + SECTION_MIN {
+                    n = clamp_point(a + SECTION_MIN, duration);
+                }
+            }
+            (start, Some(n))
+        }
+    }
+}
+
+/// The range mpv should repeat, once both ends are far enough apart.
+pub fn section_loop_range(start: Option<f64>, end: Option<f64>) -> Option<(f64, f64)> {
+    match (start, end) {
+        (Some(a), Some(b)) if b >= a + SECTION_MIN => Some((a, b)),
+        _ => None,
+    }
+}
+
+/// Playback has reached B, or the file has ended inside a section that runs to the end.
+pub fn section_reached(end: f64, time: f64, duration: f64) -> bool {
+    if time + 0.02 >= end {
+        return true;
+    }
+    duration > 0.5 && end + 0.05 >= duration && time + 0.35 >= duration
+}
+
+/// A user seek to `target` still belongs to the section, so the loop stays armed.
+pub fn seek_stays_in_section(start: f64, end: f64, target: f64) -> bool {
+    target >= start - 0.2 && target <= end + 0.2
+}
+
+pub fn section_label(start: Option<f64>, end: Option<f64>) -> Option<String> {
+    let fmt = |t: f64| crate::api::json::format_duration(t.max(0.0) as u64);
+    match (start, end) {
+        (Some(a), Some(b)) => Some(format!("{}–{}", fmt(a), fmt(b))),
+        (Some(a), None) => Some(fmt(a)),
+        (None, Some(b)) => Some(fmt(b)),
+        _ => None,
+    }
+}
+
 /// Where a chapter jump from `now` lands: the next chapter's start (`dir` > 0), or
 /// the previous chapter's start (in the first chapter, its own start).
 fn chapter_target(starts: &[f64], now: f64, dir: i32) -> Option<f64> {
@@ -1158,6 +1418,82 @@ fn chapter_target(starts: &[f64], now: f64, dir: i32) -> Option<f64> {
     }
     let cur = starts.iter().rposition(|&s| s <= now)?;
     Some(starts[cur.saturating_sub(1)])
+}
+
+#[cfg(test)]
+mod section_loop_tests {
+    use super::*;
+
+    #[::core::prelude::v1::test]
+    fn both_ends_arm_the_loop() {
+        let (a, b) = set_section_point(None, None, SectionPoint::Start, 12.4, 200.0).unwrap();
+        let (a, b) = set_section_point(a, b, SectionPoint::End, 40.2, 200.0).unwrap();
+        assert_eq!(section_loop_range(a, b), Some((12.4, 40.2)));
+        assert_eq!(section_label(a, b).as_deref(), Some("0:12–0:40"));
+    }
+
+    #[::core::prelude::v1::test]
+    fn end_before_start_is_refused_and_a_later_start_drops_the_end() {
+        let err = set_section_point(Some(20.0), None, SectionPoint::End, 20.2, 200.0);
+        assert!(err.is_err());
+        let (a, b) = set_section_point(Some(10.0), Some(20.0), SectionPoint::Start, 25.0, 200.0).unwrap();
+        assert_eq!(a, Some(25.0));
+        assert_eq!(b, None);
+        assert!(section_loop_range(a, b).is_none());
+    }
+
+    #[::core::prelude::v1::test]
+    fn playback_jumps_at_the_end_and_not_in_the_middle() {
+        assert!(!section_reached(40.0, 12.0, 200.0));
+        assert!(!section_reached(40.0, 12.0, 200.0));
+        assert!(section_reached(40.0, 40.0, 200.0));
+        assert!(section_reached(40.0, 40.5, 200.0));
+        // still before B
+        assert!(!section_reached(40.0, 39.5, 200.0));
+        // the section runs to the end of the file, and playback is there
+        assert!(section_reached(200.0, 199.8, 200.0));
+        // still in the middle of a section that ends with the file
+        assert!(!section_reached(200.0, 100.0, 200.0));
+        // already past an earlier end
+        assert!(section_reached(80.0, 199.8, 200.0));
+    }
+
+    #[::core::prelude::v1::test]
+    fn seeking_outside_leaves_the_section_and_seeking_inside_stays() {
+        assert!(seek_stays_in_section(10.0, 40.0, 10.0));
+        assert!(seek_stays_in_section(10.0, 40.0, 40.0));
+        assert!(seek_stays_in_section(10.0, 40.0, 25.0));
+        assert!(!seek_stays_in_section(10.0, 40.0, 5.0));
+        assert!(!seek_stays_in_section(10.0, 40.0, 50.0));
+        assert!(!seek_stays_in_section(10.0, 40.0, 0.0));
+    }
+
+    #[::core::prelude::v1::test]
+    fn nudge_moves_one_end_by_a_second_without_crossing() {
+        let (a, b) = nudge_section_point(Some(10.0), Some(40.0), SectionPoint::Start, 1.0, 200.0);
+        assert_eq!((a, b), (Some(11.0), Some(40.0)));
+        let (a, b) = nudge_section_point(Some(10.0), Some(40.0), SectionPoint::End, -1.0, 200.0);
+        assert_eq!((a, b), (Some(10.0), Some(39.0)));
+        // can't step the start through the end
+        let (a, b) = nudge_section_point(Some(39.0), Some(40.0), SectionPoint::Start, 5.0, 200.0);
+        assert_eq!(a, Some(39.5));
+        assert_eq!(b, Some(40.0));
+        assert!(section_loop_range(a, b).is_some());
+        // an unset end is left unset
+        let (a, b) = nudge_section_point(Some(10.0), None, SectionPoint::End, 1.0, 200.0);
+        assert_eq!((a, b), (Some(10.0), None));
+    }
+
+    #[::core::prelude::v1::test]
+    fn points_stay_inside_the_video() {
+        let (a, b) = set_section_point(None, None, SectionPoint::Start, -4.0, 90.0).unwrap();
+        assert_eq!(a, Some(0.0));
+        let (a, b) = set_section_point(a, b, SectionPoint::End, 500.0, 90.0).unwrap();
+        assert_eq!(a, Some(0.0));
+        assert_eq!(b, Some(90.0));
+        let (a, _) = nudge_section_point(Some(1.0), Some(90.0), SectionPoint::Start, -8.0, 90.0);
+        assert_eq!(a, Some(0.0));
+    }
 }
 
 #[cfg(test)]

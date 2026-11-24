@@ -1,5 +1,5 @@
 //! Video surface + YouTube-style controls.
-use super::controller::Player;
+use super::controller::{Player, SectionPoint};
 use crate::api::json::format_duration;
 use crate::api::services;
 use crate::store;
@@ -18,6 +18,7 @@ enum Menu {
     Speed,
     Captions,
     Audio,
+    Section,
 }
 
 pub struct PlayerView {
@@ -629,15 +630,30 @@ fn context_items(player: &Entity<Player>, cx: &App) -> Vec<crate::ui::app::MenuI
     let t = pl.time.max(0.0) as u64;
     let looping = pl.loop_video;
     let stats = pl.show_stats;
+    let has_section = pl.loop_a.is_some() || pl.loop_b.is_some();
     let (p1, p2, p3, p4) = (player.clone(), player.clone(), player.clone(), player.clone());
+    let (pa, pb, pc) = (player.clone(), player.clone(), player.clone());
     let (id1, id2) = (id.clone(), id);
-    vec![
+    let mut items = vec![
         MenuItem::new("repeat", if looping { "Loop: on" } else { "Loop: off" }, move |_, cx| {
             p1.update(cx, |p, cx| {
                 p.set_loop(!looping);
                 cx.notify()
             })
         }),
+        MenuItem::new("repeat", "Set loop start here", move |_, cx| {
+            pa.update(cx, |p, cx| p.mark_section_start(cx));
+        }),
+        MenuItem::new("repeat", "Set loop end here", move |_, cx| {
+            pb.update(cx, |p, cx| p.mark_section_end(cx));
+        }),
+    ];
+    if has_section {
+        items.push(MenuItem::new("x", "Clear section loop", move |_, cx| {
+            pc.update(cx, |p, cx| p.clear_section_loop_user(cx));
+        }));
+    }
+    items.extend([
         MenuItem::new("link", "Copy video URL", move |_, cx| {
             crate::ui::copy_to_clipboard(format!("https://youtu.be/{id1}"), cx);
             crate::ui::toast(cx, "Link copied");
@@ -653,13 +669,12 @@ fn context_items(player: &Entity<Player>, cx: &App) -> Vec<crate::ui::app::MenuI
                 cx.notify()
             })
         }),
-    ]
-    .into_iter()
-    .chain(std::iter::once(MenuItem::new("pause", "Play / pause", move |_, cx| p4.update(cx, |p, cx| {
+    ]);
+    items.push(MenuItem::new("pause", "Play / pause", move |_, cx| p4.update(cx, |p, cx| {
         p.toggle_pause();
         cx.notify()
-    }))))
-    .collect()
+    })));
+    items
 }
 
 fn navigate_to_current(this: &mut PlayerView, window: &mut Window, cx: &mut Context<PlayerView>) {
@@ -671,6 +686,7 @@ fn navigate_to_current(this: &mut PlayerView, window: &mut Window, cx: &mut Cont
 impl PlayerView {
     fn render_mini_controls(&self, show: bool, paused: bool, time: f64, duration: f64, cx: &mut Context<Self>) -> impl IntoElement {
         let frac = if duration > 0.0 { (time / duration) as f32 } else { 0.0 };
+        let section = self.player.read(cx).section_loop().filter(|_| duration > 0.0);
         let pp = self.player.clone();
         let pp2 = self.player.clone();
         let pp3 = self.player.clone();
@@ -774,7 +790,12 @@ impl PlayerView {
                     .w_full()
                     .h(px(3.))
                     .bg(hsla(0., 0., 1., 0.2))
-                    .child(div().h_full().w(relative(frac)).bg(pal(cx).accent)),
+                    .child(div().h_full().w(relative(frac)).bg(pal(cx).accent))
+                    .when_some(section, |d, (a, b)| {
+                        let left = (a / duration) as f32;
+                        let w = ((b - a) / duration).max(0.004) as f32;
+                        d.child(div().absolute().top_0().left(relative(left)).w(relative(w)).h_full().bg(hsla(0., 0., 1., 0.9)))
+                    }),
             )
     }
 
@@ -796,6 +817,10 @@ impl PlayerView {
         let has_next = pl.queue_pos.map(|i| i + 1 < pl.queue.len()).unwrap_or(false) || crate::ui::app::has_autoplay_next(cx);
         let chapter_title = pl.current_chapter().map(|c| c.title.clone());
         let is_live = pl.streams.as_ref().map(|s| s.is_live).unwrap_or(false);
+        let loop_a = pl.loop_a;
+        let loop_b = pl.loop_b;
+        let section_on = pl.section_loop().is_some();
+        let section_text = pl.section_label();
         let sb_show = store::settings_snapshot().sponsorblock;
         let sb_actions = store::settings_snapshot().sb_actions.clone();
         let frac = if duration > 0.0 { (time / duration) as f32 } else { 0.0 };
@@ -876,6 +901,41 @@ impl PlayerView {
                 );
             }
             bar = bar.child(graph);
+        }
+        if duration > 0.0 {
+            if let (Some(a), Some(b)) = (loop_a, loop_b) {
+                if b > a {
+                    let left = (a / duration) as f32;
+                    let w = ((b - a) / duration) as f32;
+                    bar = bar.child(
+                        div()
+                            .absolute()
+                            .left(relative(left))
+                            .w(relative(w.max(0.004)))
+                            .top(px(-2.))
+                            .h(px(base_h + 4.))
+                            .bg(accent.opacity(0.45)),
+                    );
+                }
+            }
+            for (mark, at) in [("A", loop_a), ("B", loop_b)] {
+                let Some(at) = at else { continue };
+                let x = (at / duration).clamp(0.0, 1.0) as f32;
+                bar = bar.child(div().absolute().left(relative(x)).ml(px(-1.)).top(px(-6.)).w(px(2.)).h(px(base_h + 12.)).bg(white()));
+                if active {
+                    bar = bar.child(
+                        div()
+                            .absolute()
+                            .left(relative(x))
+                            .ml(px(-6.))
+                            .bottom(px(base_h + 8.))
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(white())
+                            .child(mark),
+                    );
+                }
+            }
         }
         if sb_show && duration > 0.0 {
             for s in &segments {
@@ -981,6 +1041,13 @@ impl PlayerView {
         let vol_frac = if muted { 0.0 } else { (volume / 100.0).min(1.0) as f32 };
         let time_text = if is_live {
             "● LIVE".to_string()
+        } else if section_on {
+            format!(
+                "{} / {}   {}",
+                format_duration(time as u64),
+                format_duration(duration as u64),
+                section_text.unwrap_or_default()
+            )
         } else {
             format!("{} / {}", format_duration(time as u64), format_duration(duration as u64))
         };
@@ -1103,6 +1170,27 @@ impl PlayerView {
                     this.player.update(cx, |p, cx| p.screenshot(cx));
                     this.poke(cx);
                 })))
+            })
+            .child({
+                let on = section_on;
+                div()
+                    .id("c-ab")
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .h_10()
+                    .px_2()
+                    .rounded_full()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(hsla(0., 0., 1., 0.15)))
+                    .child(div().text_xs().font_weight(FontWeight::BOLD).text_color(if on { accent } else { white() }).child("A–B"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        let just_closed = this.menu_closed_at.elapsed() < std::time::Duration::from_millis(400);
+                        this.menu = if this.menu == Some(Menu::Section) || just_closed { None } else { Some(Menu::Section) };
+                        this.poke(cx);
+                    }))
             })
             .child(ctl_btn("c-settings", "settings").on_click(cx.listener(|this, _, _, cx| {
                 // a mouse-down here already closed an open menu (outside click); don't reopen it
@@ -1383,6 +1471,16 @@ impl PlayerView {
                         row("m-l".into(), Some("repeat"), "Loop".into(), Some(if looping { "On".into() } else { "Off".into() }), false)
                             .on_click(cx.listener(move |t, _, _, cx| t.player.update(cx, |p, cx| { p.set_loop(!looping); cx.notify() }))),
                     )
+                    .child({
+                        let ab = match (pl.loop_a, pl.loop_b) {
+                            (Some(_), Some(_)) => pl.section_label().unwrap_or_else(|| "On".into()),
+                            (Some(_), None) => "Start set".into(),
+                            (None, Some(_)) => "End set".into(),
+                            _ => "Off".into(),
+                        };
+                        row("m-ab".into(), Some("repeat"), "Section loop".into(), Some(ab), false)
+                            .on_click(cx.listener(|t, _, _, cx| { t.menu = Some(Menu::Section); cx.notify() }))
+                    })
                     .child(
                         row("m-stats".into(), Some("activity"), "Stats for nerds".into(), None, false).on_click(cx.listener(|t, _, _, cx| {
                             t.menu = None;
@@ -1468,6 +1566,75 @@ impl PlayerView {
                             })),
                     );
                 }
+            }
+            Menu::Section => {
+                let a = pl.loop_a;
+                let b = pl.loop_b;
+                let armed = pl.section_loop().is_some();
+                let repeating = pl.section_label().unwrap_or_default();
+                let shown = |t: Option<f64>| t.map(|t| format_duration(t.max(0.0) as u64)).unwrap_or_else(|| "—".into());
+                let nudge = |id: SharedString, label: SharedString| {
+                    div()
+                        .id(id)
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(hsla(0., 0., 1., 0.15))
+                        .cursor_pointer()
+                        .text_sm()
+                        .text_color(white())
+                        .child(label)
+                };
+                panel = panel.child(header("Section loop", cx)).child(
+                    div().px_4().py_2().text_sm().text_color(white()).child(if armed {
+                        format!("Repeating {repeating}")
+                    } else {
+                        "Set a start and an end. Playback repeats that part.".into()
+                    }),
+                );
+                panel = panel
+                    .child(row("ab-now-a".into(), None, "Set start to now".into(), Some(shown(a)), false).on_click(cx.listener(|t, _, _, cx| {
+                        t.player.update(cx, |p, cx| p.mark_section_start(cx));
+                    })))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .gap_2()
+                            .px_3()
+                            .pb_2()
+                            .child(nudge("ab-a-dec".into(), "−1s".into()).on_click(cx.listener(|t, _, _, cx| {
+                                t.player.update(cx, |p, cx| p.nudge_section(SectionPoint::Start, -1.0, cx));
+                            })))
+                            .child(div().text_sm().text_color(white()).min_w(px(52.)).text_center().child(shown(a)))
+                            .child(nudge("ab-a-inc".into(), "+1s".into()).on_click(cx.listener(|t, _, _, cx| {
+                                t.player.update(cx, |p, cx| p.nudge_section(SectionPoint::Start, 1.0, cx));
+                            }))),
+                    )
+                    .child(row("ab-now-b".into(), None, "Set end to now".into(), Some(shown(b)), false).on_click(cx.listener(|t, _, _, cx| {
+                        t.player.update(cx, |p, cx| p.mark_section_end(cx));
+                    })))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .gap_2()
+                            .px_3()
+                            .pb_2()
+                            .child(nudge("ab-b-dec".into(), "−1s".into()).on_click(cx.listener(|t, _, _, cx| {
+                                t.player.update(cx, |p, cx| p.nudge_section(SectionPoint::End, -1.0, cx));
+                            })))
+                            .child(div().text_sm().text_color(white()).min_w(px(52.)).text_center().child(shown(b)))
+                            .child(nudge("ab-b-inc".into(), "+1s".into()).on_click(cx.listener(|t, _, _, cx| {
+                                t.player.update(cx, |p, cx| p.nudge_section(SectionPoint::End, 1.0, cx));
+                            }))),
+                    )
+                    .child(row("ab-clear".into(), None, "Clear".into(), None, false).on_click(cx.listener(|t, _, _, cx| {
+                        t.player.update(cx, |p, cx| p.clear_section_loop_user(cx));
+                    })))
+                    .child(div().px_4().pt_1().text_xs().text_color(hsla(0., 0., 1., 0.55)).child("[ sets the start, ] the end, \\ clears"));
             }
             Menu::Audio => {
                 let cur = pl.audio_track.clone();
