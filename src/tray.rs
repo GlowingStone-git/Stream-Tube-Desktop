@@ -372,15 +372,23 @@ fn build_icon() -> Result<tray_icon::TrayIcon, String> {
 }
 
 fn app_icon() -> Option<tray_icon::Icon> {
-    static CACHED: OnceLock<Option<tray_icon::Icon>> = OnceLock::new();
-    CACHED.get_or_init(decode_icon).clone()
+    // Windows `Icon` owns an HICON (`*mut c_void`), so it is neither Send nor
+    // Sync and cannot live in a static. Cache the pixels and build a fresh
+    // icon on the UI thread when the tray is created.
+    let (rgba, w, h) = cached_rgba()?;
+    tray_icon::Icon::from_rgba(rgba, w, h).ok()
 }
 
-fn decode_icon() -> Option<tray_icon::Icon> {
+fn cached_rgba() -> Option<(Vec<u8>, u32, u32)> {
+    static CACHED: OnceLock<Option<(Vec<u8>, u32, u32)>> = OnceLock::new();
+    CACHED.get_or_init(decode_rgba).clone()
+}
+
+fn decode_rgba() -> Option<(Vec<u8>, u32, u32)> {
     let img = image::load_from_memory(include_bytes!("../assets/logo.png")).ok()?;
     let img = image::imageops::resize(&img.to_rgba8(), 64, 64, image::imageops::FilterType::Triangle);
     let (w, h) = img.dimensions();
-    tray_icon::Icon::from_rgba(img.into_raw(), w, h).ok()
+    Some((img.into_raw(), w, h))
 }
 
 #[cfg(windows)]
